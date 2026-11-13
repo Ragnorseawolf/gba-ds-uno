@@ -1,0 +1,5 @@
+#!/bin/bash
+# PATH shim so upstream's scripts/build-android.sh (which calls plain
+# `gradle`) gets our in-process Gradle launcher. See ../gradle-inproc.sh
+# for why a forked Gradle daemon cannot work in this sandbox.
+exec "$(cd "$(dirname "$0")/.." && pwd)/gradle-inproc.sh" "$@"

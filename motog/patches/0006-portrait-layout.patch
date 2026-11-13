@@ -1,0 +1,93 @@
+diff --git a/android/app/src/main/AndroidManifest.xml b/android/app/src/main/AndroidManifest.xml
+index 0e15af3..7cc3f7b 100644
+--- a/android/app/src/main/AndroidManifest.xml
++++ b/android/app/src/main/AndroidManifest.xml
+@@ -56,13 +56,17 @@
+             </intent-filter>
+         </activity>
+ 
++        <!-- [motog patch 0006] portrait, not upstream's landscape: the
++             phone is held upright and the two screens stack (span-v).
++             The SDL orientation hint in src/ui.c says "Portrait" too;
++             SDL would override this at runtime if it disagreed. -->
+         <activity
+             android:name=".GbaDsActivity"
+             android:exported="false"
+             android:launchMode="singleTask"
+             android:taskAffinity="io.github.kyannon.gbads.game"
+             android:alwaysRetainTaskState="true"
+-            android:screenOrientation="landscape"
++            android:screenOrientation="portrait"
+             android:preferMinimalPostProcessing="true"
+             android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation|density" />
+     </application>
+diff --git a/src/android.c b/src/android.c
+index e569db4..a1e679f 100644
+--- a/src/android.c
++++ b/src/android.c
+@@ -111,20 +111,23 @@ void android_data_setup(void) {
+ /* [motog patch 0005] Run from main() once defaults, gba-ds.cfg,
+  * prefs.cfg, library.cfg and hotkeys.cfg have all had their say, so
+  * nothing loaded from the phone can override these two: this edition
+- * shows both of GBA DS's screens inside the phone's one window —
+- * layout span-h (layout_screens() splits the single view: game on the
+- * left, the second screen on the right) — and the second screen is the
+- * live map, which needs the shadow map core running. A gba-ds.cfg
+- * copied from the earlier single-screen build pins layout = single /
+- * map = 0 and, loading after the compiled defaults below, would
+- * silently win without this pin; no settings file the app itself
+- * writes can contain either key (save_prefs and save_library_cfg use
+- * fixed key lists without them, and nothing else writes the fields),
+- * so pinning here cannot fight a choice made in a menu. */
++ * shows both of GBA DS's screens inside the phone's one window, and
++ * the second screen is the live map, which needs the shadow map core
++ * running. A gba-ds.cfg copied from the earlier single-screen build
++ * pins layout = single / map = 0 and, loading after the compiled
++ * defaults below, would silently win without this pin; no settings
++ * file the app itself writes can contain either key (save_prefs and
++ * save_library_cfg use fixed key lists without them, and nothing
++ * else writes the fields), so pinning here cannot fight a choice
++ * made in a menu.
++ * [motog patch 0006] The value: span-v, not 0005's span-h — the
++ * phone is held portrait (manifest + SDL orientation hint), so
++ * layout_screens() stacks the screens like a real DS: game
++ * (screens[0]) on the top half, the second screen on the bottom. */
+ void android_config_finalise(Config* c) {
+-	snprintf(c->layout, sizeof(c->layout), "span-h");
++	snprintf(c->layout, sizeof(c->layout), "span-v");
+ 	c->map = true;
+-	fprintf(stderr, "motog: two screens in one window (layout span-h, map on)\n");
++	fprintf(stderr, "motog: two screens in one window (layout span-v, map on)\n");
+ }
+ 
+ void android_config_defaults(Config* c) {
+@@ -137,8 +140,9 @@ void android_config_defaults(Config* c) {
+ 	 * the defaults agree with android_config_finalise() above (which
+ 	 * is what actually decides on a phone with config files present).
+ 	 * The shadow core is the big CPU cost on a mid-range SoC; that is
+-	 * the accepted price of the second screen. */
+-	snprintf(c->layout, sizeof(c->layout), "span-h");
++	 * the accepted price of the second screen.
++	 * [motog patch 0006] span-v: stacked portrait (see finalise). */
++	snprintf(c->layout, sizeof(c->layout), "span-v");
+ 	c->map = true;
+ 	c->showAll = true;
+ 	c->shader = SH_OFF;
+diff --git a/src/ui.c b/src/ui.c
+index 3a531af..3e725a4 100644
+--- a/src/ui.c
++++ b/src/ui.c
+@@ -389,7 +389,12 @@ bool ui_init(Config* c, bool wantDual) {
+ 	SDL_SetHint(SDL_HINT_APP_NAME, "GBA DS");
+ 	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, cfg->smooth ? "linear" : "nearest");
+ #ifdef __ANDROID__
+-	SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft");
++	/* [motog patch 0006] Portrait, to match the manifest: SDL's Java
++	 * side turns this hint into setRequestedOrientation() at window
++	 * creation, so a LandscapeLeft hint here would rotate the activity
++	 * back to landscape even with a portrait manifest. "Portrait" ends
++	 * the hint string, which is how SDLActivity detects it. */
++	SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait");
+ 	SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1"); /* BACK opens the menu instead of closing the app */
+ #endif
+ 	setenv("SDL_VIDEO_WAYLAND_WMCLASS", "gba-ds", 0);

@@ -1,0 +1,83 @@
+diff --git a/src/android.c b/src/android.c
+index a00c2a5..e569db4 100644
+--- a/src/android.c
++++ b/src/android.c
+@@ -108,14 +108,38 @@ void android_data_setup(void) {
+ 
+ /* ------------------------------------------------------------- defaults */
+ 
++/* [motog patch 0005] Run from main() once defaults, gba-ds.cfg,
++ * prefs.cfg, library.cfg and hotkeys.cfg have all had their say, so
++ * nothing loaded from the phone can override these two: this edition
++ * shows both of GBA DS's screens inside the phone's one window —
++ * layout span-h (layout_screens() splits the single view: game on the
++ * left, the second screen on the right) — and the second screen is the
++ * live map, which needs the shadow map core running. A gba-ds.cfg
++ * copied from the earlier single-screen build pins layout = single /
++ * map = 0 and, loading after the compiled defaults below, would
++ * silently win without this pin; no settings file the app itself
++ * writes can contain either key (save_prefs and save_library_cfg use
++ * fixed key lists without them, and nothing else writes the fields),
++ * so pinning here cannot fight a choice made in a menu. */
++void android_config_finalise(Config* c) {
++	snprintf(c->layout, sizeof(c->layout), "span-h");
++	c->map = true;
++	fprintf(stderr, "motog: two screens in one window (layout span-h, map on)\n");
++}
++
+ void android_config_defaults(Config* c) {
+ 	/* [motog patch 0001] Phone-first compiled defaults (the same values
+-	 * as motog/gba-ds.cfg, for installs without one): one screen, the
+-	 * shadow map core off (the big speed win on a mid-range SoC), every
+-	 * ROM listed, no shader, no rewind, and no upstream update offers
+-	 * (an upstream APK could not install over this build's key anyway). */
+-	snprintf(c->layout, sizeof(c->layout), "single");
+-	c->map = false;
++	 * as motog/gba-ds.cfg, for installs without one): every ROM listed,
++	 * no shader, no rewind, and no upstream update offers (an upstream
++	 * APK could not install over this build's key anyway).
++	 * [motog patch 0005] Layout and map: no longer one screen with the
++	 * shadow core off — Layne wants both screens in the one window, so
++	 * the defaults agree with android_config_finalise() above (which
++	 * is what actually decides on a phone with config files present).
++	 * The shadow core is the big CPU cost on a mid-range SoC; that is
++	 * the accepted price of the second screen. */
++	snprintf(c->layout, sizeof(c->layout), "span-h");
++	c->map = true;
+ 	c->showAll = true;
+ 	c->shader = SH_OFF;
+ 	c->rewind = false;
+diff --git a/src/android.h b/src/android.h
+index db1b536..35ee610 100644
+--- a/src/android.h
++++ b/src/android.h
+@@ -27,6 +27,11 @@ void android_data_setup(void);
+ bool android_data_record(char* out, size_t size);
+ /* Android defaults: ROM folders, screenshots, cheats, no sway. */
+ void android_config_defaults(Config* cfg);
++/* [motog patch 0005] Called from main() after every config file has
++ * loaded: pins this edition's two-screens-in-one-window layout and the
++ * live map, which a config file left over from the single-screen build
++ * would otherwise override. */
++void android_config_finalise(Config* cfg);
+ /* Opens Android's folder picker (the activity goes to the background while
+  * it's up). False if it couldn't. The answer comes later: */
+ bool android_pick_folder(void);
+diff --git a/src/main.c b/src/main.c
+index 3e84177..49082e4 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -178,6 +178,13 @@ int main(int argc, char** argv) {
+ 	snprintf(path, sizeof(path), "%s/hotkeys.cfg", cfg.stateDir);
+ 	config_load_file(&cfg, path);
+ 	config_parse_args(&cfg, argc, argv);
++#ifdef __ANDROID__
++	/* [motog patch 0005] every config file has loaded: pin this
++	 * edition's two-screens-in-one-window layout and live map, which a
++	 * gba-ds.cfg left over from the single-screen build would
++	 * otherwise take away (see android_config_finalise) */
++	android_config_finalise(&cfg);
++#endif
+ 	if (cfg.overlayMode == OVM_LEGACY) {
+ 		/* overlays = top / both... from before v1.5 (the player's PNGs, which
+ 		 * had no bezel to fall back on): Custom if overlays/ has any, else

@@ -1,0 +1,22 @@
+diff --git a/src/android.c b/src/android.c
+index da7576c..a20a63c 100644
+--- a/src/android.c
++++ b/src/android.c
+@@ -109,6 +109,17 @@ void android_data_setup(void) {
+ /* ------------------------------------------------------------- defaults */
+ 
+ void android_config_defaults(Config* c) {
++	/* [motog patch 0001] Phone-first compiled defaults (the same values
++	 * as motog/gba-ds.cfg, for installs without one): one screen, the
++	 * shadow map core off (the big speed win on a mid-range SoC), every
++	 * ROM listed, no shader, no rewind, and no upstream update offers
++	 * (an upstream APK could not install over this build's key anyway). */
++	snprintf(c->layout, sizeof(c->layout), "single");
++	c->map = false;
++	c->showAll = true;
++	c->shader = SH_OFF;
++	c->rewind = false;
++	c->updateCheck = false;
+ 	/* shared storage ignores case: this is also a folder called GBA */
+ 	snprintf(c->romDir, sizeof(c->romDir), "/storage/emulated/0/ROMs/gba");
+ 	/* GBADS_HOME is "GBA DS" on the internal storage (or, without All files

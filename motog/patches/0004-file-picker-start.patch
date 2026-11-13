@@ -1,0 +1,236 @@
+diff --git a/android/app/src/main/java/io/github/kyannon/gbads/GbaDsActivity.java b/android/app/src/main/java/io/github/kyannon/gbads/GbaDsActivity.java
+index 3f77cc4..8f1ce0a 100644
+--- a/android/app/src/main/java/io/github/kyannon/gbads/GbaDsActivity.java
++++ b/android/app/src/main/java/io/github/kyannon/gbads/GbaDsActivity.java
+@@ -202,6 +202,12 @@ public class GbaDsActivity extends SDLActivity {
+ 
+     static native void nativeFolderPicked(String path);
+ 
++    /* ------------------------------------------------------------ game file picker */
++
++    private static final int PICK_FILE = 4712;
++
++    static native void nativeFilePicked(String path);
++
+     /* ------------------------------------------------------------ RetroAchievements sign-in */
+ 
+     /** user/password, or nulls when cancelled. */
+@@ -266,8 +272,35 @@ public class GbaDsActivity extends SDLActivity {
+         });
+     }
+ 
++    /**
++     * Called by the native side (main thread, at start-up): opens Android's
++     * file picker for one game, which the native side then plays directly —
++     * no folder scan. Deliberately permissive (*\/*): .gba files usually
++     * report as octet-stream or not at all, and the native side checks the
++     * picked file's name itself.
++     */
++    public void pickRomFile() {
++        runOnUiThread(() -> {
++            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
++            i.addCategory(Intent.CATEGORY_OPENABLE);
++            i.setType("*/*");
++            i.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {
++                    "application/zip", "application/x-7z-compressed", "application/octet-stream" });
++            try {
++                startActivityForResult(i, PICK_FILE);
++            } catch (ActivityNotFoundException e) {
++                Log.e(TAG, "no file picker: " + e);
++                nativeFilePicked("");
++            }
++        });
++    }
++
+     @Override
+     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
++        if (requestCode == PICK_FILE) {
++            onFilePicked(resultCode, data);
++            return;
++        }
+         if (requestCode != PICK_FOLDER) {
+             super.onActivityResult(requestCode, resultCode, data);
+             return;
+@@ -280,6 +313,29 @@ public class GbaDsActivity extends SDLActivity {
+         nativeFolderPicked(path);
+     }
+ 
++    /** The picked game (a document URI) as a plain path, via the launcher's
++     * resolver: read in place where a real path exists (so the battery save
++     * stays next to the ROM), copied into the app's folder otherwise. */
++    private void onFilePicked(int resultCode, Intent data) {
++        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
++            nativeFilePicked("");
++            return;
++        }
++        final Uri uri = data.getData();
++        /* off the UI thread: the copy can take a while for a big ROM,
++         * the same reason the launcher resolves its game off it */
++        new Thread(() -> {
++            String path = null;
++            try {
++                path = LauncherActivity.fromUri(this, uri);
++            } catch (RuntimeException e) {
++                Log.w(TAG, "couldn't get the picked game: " + e);
++            }
++            Log.i(TAG, "file picked: " + uri + " -> " + path);
++            nativeFilePicked(path != null ? path : "");
++        }, "gbads-pick").start();
++    }
++
+     /** A picked folder (tree URI) as a plain path (readable with All files access). */
+     private static String treeUriToPath(Uri uri) {
+         try {
+diff --git a/android/app/src/main/java/io/github/kyannon/gbads/LauncherActivity.java b/android/app/src/main/java/io/github/kyannon/gbads/LauncherActivity.java
+index 2c4c12d..b7510a8 100644
+--- a/android/app/src/main/java/io/github/kyannon/gbads/LauncherActivity.java
++++ b/android/app/src/main/java/io/github/kyannon/gbads/LauncherActivity.java
+@@ -280,7 +280,9 @@ public class LauncherActivity extends Activity {
+         return null;
+     }
+ 
+-    private static String fromUri(Context c, Uri u) {
++    /* package-visible: GbaDsActivity's start-up file picker resolves its
++     * picked game through this too */
++    static String fromUri(Context c, Uri u) {
+         if ("file".equals(u.getScheme())) return u.getPath();
+         /* a bare path (some frontends: data=/storage/.../game.gba) */
+         if (u.getScheme() == null && u.getPath() != null && u.getPath().startsWith("/")) return u.getPath();
+diff --git a/src/android.c b/src/android.c
+index a20a63c..a00c2a5 100644
+--- a/src/android.c
++++ b/src/android.c
+@@ -556,6 +556,59 @@ JNIEXPORT void JNICALL Java_io_github_kyannon_gbads_GbaDsActivity_nativeFolderPi
+ 	if (p) (*env)->ReleaseStringUTFChars(env, path, p);
+ }
+ 
++/* ------------------------------------------------------------- game file picker */
++
++/* The start-up picker (motog patch 0004): its own state, so it can never
++ * cross-talk with the folder picker's. Same shape as above. */
++static pthread_mutex_t filePickLock = PTHREAD_MUTEX_INITIALIZER;
++static char filePicked[1024];
++static int filePickState; /* 0 nothing, 1 a file picked, -1 cancelled */
++
++bool android_pick_file(void) {
++	JNIEnv* env = (JNIEnv*) SDL_AndroidGetJNIEnv();
++	jobject activity = (jobject) SDL_AndroidGetActivity();
++	if (!env || !activity) return false;
++	/* by the activity's class: FindClass on this thread wouldn't see the app's classes */
++	jclass cls = (*env)->GetObjectClass(env, activity);
++	jmethodID m = (*env)->GetMethodID(env, cls, "pickRomFile", "()V");
++	bool ok = m != NULL;
++	if (ok) {
++		pthread_mutex_lock(&filePickLock);
++		filePickState = 0;
++		pthread_mutex_unlock(&filePickLock);
++		(*env)->CallVoidMethod(env, activity, m);
++	}
++	if ((*env)->ExceptionCheck(env)) {
++		(*env)->ExceptionClear(env);
++		ok = false;
++	}
++	(*env)->DeleteLocalRef(env, cls);
++	(*env)->DeleteLocalRef(env, activity);
++	return ok;
++}
++
++int android_take_picked_file(char* out, size_t size) {
++	pthread_mutex_lock(&filePickLock);
++	int st = filePickState;
++	if (st == 1) snprintf(out, size, "%s", filePicked);
++	filePickState = 0;
++	pthread_mutex_unlock(&filePickLock);
++	return st;
++}
++
++JNIEXPORT void JNICALL Java_io_github_kyannon_gbads_GbaDsActivity_nativeFilePicked(JNIEnv* env, jclass cls, jstring path) {
++	const char* p = path ? (*env)->GetStringUTFChars(env, path, NULL) : NULL;
++	pthread_mutex_lock(&filePickLock);
++	if (p && *p) {
++		snprintf(filePicked, sizeof(filePicked), "%s", p);
++		filePickState = 1;
++	} else {
++		filePickState = -1;
++	}
++	pthread_mutex_unlock(&filePickLock);
++	if (p) (*env)->ReleaseStringUTFChars(env, path, p);
++}
++
+ /* ------------------------------------------------------------- second screen */
+ 
+ /* Frames go to the second display from a thread of their own: handing a
+diff --git a/src/android.h b/src/android.h
+index f1d1c31..db1b536 100644
+--- a/src/android.h
++++ b/src/android.h
+@@ -32,6 +32,12 @@ void android_config_defaults(Config* cfg);
+ bool android_pick_folder(void);
+ /* 1: a folder was picked (its path in out), -1: cancelled, 0: no answer yet. */
+ int android_take_picked_folder(char* out, size_t size);
++/* Opens Android's file picker for a single game (the start-up picker:
++ * library.c plays the one picked file instead of scanning a folder).
++ * False if it couldn't. The answer comes later: */
++bool android_pick_file(void);
++/* 1: a file was picked (its path in out), -1: cancelled, 0: no answer yet. */
++int android_take_picked_file(char* out, size_t size);
+ 
+ /* RetroAchievements: an HTTP request through Java (Http.java), from any
+  * thread. post NULL: GET. outPath: download to that file (body unused).
+diff --git a/src/library.c b/src/library.c
+index 4c80955..e4854d5 100644
+--- a/src/library.c
++++ b/src/library.c
+@@ -1613,6 +1613,52 @@ static int keep_visible(int scr, int sel, int scroll) {
+ }
+ 
+ bool library_run(Config* cfg, char* outPath, size_t outSize) {
++#ifdef __ANDROID__
++	/* motog patch 0004: file-picker-first start-up. Scanning a big ROM
++	 * folder can take minutes (every zip/7z in it is opened hunting
++	 * headers), which reads as a hang, so the first entry each start
++	 * asks for ONE game file in Android's picker and plays it through
++	 * this function's usual return path — no scan runs before it, and
++	 * the game starts exactly as if picked from the list (main runs it
++	 * with fromLibrary, and last_game.txt is written the same way).
++	 * Backing out of the picker, or picking a file that isn't a game,
++	 * falls through to the game list below, as before; coming back
++	 * from a game lands on the list too (this runs once per start). */
++	{
++		static bool startupPickDone;
++		if (!startupPickDone) {
++			startupPickDone = true;
++			if (android_pick_file()) {
++				char path[1024];
++				int st = 0;
++				while (!(st = android_take_picked_file(path, sizeof(path)))) {
++					if (!ui_events()) break; /* the app is quitting */
++					int scr = ui_touch_screen();
++					SDL_Rect r = screens[scr].rect;
++					ui_clear();
++					ui_label(scr, r.w / 2, r.h / 2, (int) (ui_px(scr) * 6),
++					         "Choose a game in Android's file picker...", C_TEXT);
++					ui_present();
++					SDL_Delay(50);
++				}
++				if (st > 0 && emu_is_rom_name(path)) {
++					snprintf(outPath, outSize, "%s", path);
++					char lastFile[1100];
++					snprintf(lastFile, sizeof(lastFile), "%s/last_game.txt", cfg->stateDir);
++					FILE* lf = fopen(lastFile, "w");
++					if (lf) {
++						fprintf(lf, "%s\n", outPath);
++						fclose(lf);
++					}
++					fprintf(stderr, "library: %s from the start-up file picker\n", outPath);
++					return true;
++				}
++				if (st > 0)
++					fprintf(stderr, "library: %s isn't a game file; the game list instead\n", path);
++			}
++		}
++	}
++#endif
+ 	storage_check(cfg);
+ 	{ /* motog patch 0003: the first scan can take minutes on a big
+ 	   * folder (every zip/7z is opened) — present a label first so

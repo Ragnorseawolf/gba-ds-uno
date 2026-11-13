@@ -1,0 +1,20 @@
+diff --git a/src/library.c b/src/library.c
+index 876727b..4c80955 100644
+--- a/src/library.c
++++ b/src/library.c
+@@ -1614,6 +1614,15 @@ static int keep_visible(int scr, int sel, int scroll) {
+ 
+ bool library_run(Config* cfg, char* outPath, size_t outSize) {
+ 	storage_check(cfg);
++	{ /* motog patch 0003: the first scan can take minutes on a big
++	   * folder (every zip/7z is opened) — present a label first so
++	   * the app never sits on a black screen while it works */
++		int scr = ui_touch_screen();
++		SDL_Rect r = screens[scr].rect;
++		ui_clear();
++		ui_label(scr, r.w / 2, r.h / 2, (int) (ui_px(scr) * 6), "Scanning...", C_TEXT);
++		ui_present();
++	}
+ 	scan(cfg);
+ 	thumbFor = -2;
+ 
